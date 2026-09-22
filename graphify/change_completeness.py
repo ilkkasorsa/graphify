@@ -41,12 +41,24 @@ def file_dimensions(path: str, *, test_like: bool = False) -> set[str]:
 
 
 def _changed_consumers(projection: dict[str, Any], changed: set[str]) -> set[str]:
-    return {relation["source"] for relation in projection["relations"] if relation["source"] in changed and relation["relation"] in CONSUMER_RELATIONS}
+    return {
+        relation["source"]
+        for relation in projection["relations"]
+        if relation["source"] in changed
+        and relation["target"] in changed
+        and relation["source"] != relation["target"]
+        and relation["relation"] in CONSUMER_RELATIONS
+    }
 
 
-def _candidate_dimensions(candidate: dict[str, Any]) -> set[str]:
+def _candidate_dimensions(candidate: dict[str, Any], projection: dict[str, Any], represented: set[str]) -> set[str]:
     roles = file_dimensions(candidate["path"], test_like=candidate["test_like"])
-    if set(candidate["relations_to_seed"]) & CONSUMER_RELATIONS:
+    if any(
+        relation["source"] == candidate["path"]
+        and relation["target"] in represented
+        and relation["relation"] in CONSUMER_RELATIONS
+        for relation in projection["relations"]
+    ):
         roles.add("consumers")
     return roles
 
@@ -62,7 +74,11 @@ def build_plan(analysis: dict[str, Any]) -> dict[str, Any]:
     for path in _changed_consumers(projection, set(result["changed_files"])):
         if path in changed_roles:
             changed_roles[path].add("consumers")
-    candidate_roles = {candidate["path"]: _candidate_dimensions(candidate) for candidate in candidates}
+    represented = set(analysis.get("represented", result.get("represented_seeds", [])))
+    candidate_roles = {
+        candidate["path"]: _candidate_dimensions(candidate, projection, represented)
+        for candidate in candidates
+    }
     dimensions: dict[str, dict[str, Any]] = {}
     for dimension in DIMENSIONS:
         changed = sorted(path for path, roles in changed_roles.items() if dimension in roles)
