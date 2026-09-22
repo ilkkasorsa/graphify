@@ -588,6 +588,9 @@ def _run_cli() -> None:
         print("    --relation R            edge relation to traverse in reverse (repeatable)")
         print("    --depth N               reverse traversal depth (default 2)")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
+        print("  missing-impact --task T  task-aware file candidates; hypotheses requiring source verification")
+        print("    [--repo PATH] [--graph PATH] [--changed PATH ...] [--top 1..12] [--live] [--json]")
+        print("    Unlike affected's deterministic reverse reachability, this discovers candidates and optionally Jev-reranks them.")
         print("  jev-shadow --task FILE   opt-in TypeSafe Jev judgments into .graphify_jev.json")
         print("    --graph PATH            graph.json to inspect (default graphify-out/graph.json)")
         print("    --dry-run               print outbound metadata state; no key or network call")
@@ -744,7 +747,7 @@ def _run_cli() -> None:
     # (e.g. "cursor install --help" was silently installing into Cursor, #821).
     # Exempt: free-text commands (user string may contain these tokens), and
     # "install"/"uninstall" which have their own per-subcommand help handlers.
-    _FREE_TEXT_CMDS = {"query", "explain", "path", "save-result", "install", "uninstall"}
+    _FREE_TEXT_CMDS = {"query", "explain", "path", "save-result", "missing-impact", "install", "uninstall"}
     if cmd not in _FREE_TEXT_CMDS and any(a in {"-h", "--help", "-?"} for a in sys.argv[2:]):
         print(f"Run 'graphify --help' for full usage.")
         return
