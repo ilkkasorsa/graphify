@@ -49,6 +49,57 @@ def test_render_is_idempotent():
     assert [(a.path, a.content) for a in first] == [(a.path, a.content) for a in second]
 
 
+def test_change_completeness_pilot_is_codex_only_and_bounded():
+    """The verification-plan pilot is Codex-only and preserves its authority boundary."""
+    platforms = gen.load_platforms()
+    codex = gen.render_all(platforms, only="codex")
+    codex_skill = next(a.content for a in codex if a.path == "graphify/skill-codex.md")
+
+    assert codex_skill.count("## Bounded post-change verification with Change Completeness") == 1
+    for phrase in (
+        "graphify change-completeness --task \"<actual task objective>\" --json",
+        "deterministic and network-free",
+        "all of these apply",
+        "NO_CHANGED_FILES",
+        "NO_GRAPH_REPRESENTED_SEEDS",
+        "CHANGED_EVIDENCE",
+        "VERIFY_CANDIDATE",
+        "inspect the listed source, confirm or reject the relationship",
+        "NO_STRUCTURAL_EVIDENCE",
+        "JEV_INFERRED",
+        "verification plan, not a completeness certification",
+        "do not rerun until candidates disappear",
+    ):
+        assert phrase in codex_skill, phrase
+
+    # Live mode remains opt-in and bounded by existing authorization and key state.
+    assert "--live` is optional" in codex_skill
+    assert "already authorized by the user or project" in codex_skill
+    assert "and `TYPESAFE_API_KEY` is already available" in codex_skill
+    assert "Never silently enable it" in codex_skill
+    assert "Never silently enable it, request a TypeSafe key solely for this check" in codex_skill
+    assert "Jev ranking or Noul values never establish repository truth" in codex_skill
+    assert "Jev is authoritative" not in codex_skill
+    assert "must use `--live`" not in codex_skill
+    assert "ask the user for a TypeSafe key" not in codex_skill
+
+    for host in ("claude", "amp"):
+        rendered = gen.render_all(platforms, only=host)
+        skill = next(a.content for a in rendered if a.path == platforms[host].skill_dst)
+        assert "Bounded post-change verification with Change Completeness" not in skill
+
+    # A fresh Codex render matches both checked-in output and the blessed snapshot.
+    assert gen.check(codex) == []
+    assert [(a.path, a.content) for a in codex] == [
+        (a.path, a.content) for a in gen.render_all(platforms, only="codex")
+    ]
+
+    # The pilot is on-demand skill guidance and leaves always-on renders untouched.
+    always_on = gen.render_always_on()
+    assert all("Change Completeness" not in a.content for a in always_on)
+    assert all("change-completeness" not in a.content for a in always_on)
+
+
 def test_render_output_is_lf_only():
     """Generated artifacts use LF newlines and end in exactly one newline."""
     platforms = gen.load_platforms()
