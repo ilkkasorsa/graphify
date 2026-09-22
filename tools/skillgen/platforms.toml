@@ -52,6 +52,7 @@ description = "Use for any question about a codebase, its architecture, file rel
 dispatch = "codex-agenttask"
 extraction = "compact"
 shell = "posix"
+extra_sections = ["change-verification"]
 
 [platform.windows]
 bucket = "split"
