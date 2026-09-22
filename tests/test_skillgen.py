@@ -64,7 +64,7 @@ def test_change_completeness_pilot_is_codex_only_and_bounded():
         "NO_GRAPH_REPRESENTED_SEEDS",
         "CHANGED_EVIDENCE",
         "VERIFY_CANDIDATE",
-        "inspect relevant source → confirm or reject the relationship",
+        "inspect the listed source, confirm or reject the relationship",
         "NO_STRUCTURAL_EVIDENCE",
         "JEV_INFERRED",
         "verification plan, not a completeness certification",
@@ -77,7 +77,7 @@ def test_change_completeness_pilot_is_codex_only_and_bounded():
     assert "already authorized by the user or project" in codex_skill
     assert "and `TYPESAFE_API_KEY` is already available" in codex_skill
     assert "Never silently enable it" in codex_skill
-    assert "never request a TypeSafe key solely for this check" in codex_skill
+    assert "Never silently enable it, request a TypeSafe key solely for this check" in codex_skill
     assert "Jev ranking or Noul values never establish repository truth" in codex_skill
     assert "Jev is authoritative" not in codex_skill
     assert "must use `--live`" not in codex_skill
