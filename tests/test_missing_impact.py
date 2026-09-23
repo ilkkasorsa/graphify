@@ -43,13 +43,16 @@ def test_candidates_cover_direct_two_hop_parent_and_community_and_exclude_seed()
 
 def test_payload_is_candidate_bound_and_has_no_structural_scores_or_source():
     projection = mi.project_graph(_graph())
-    payload = mi.jev_payload("fix thing", projection, ["pkg/a.py"], mi.candidates(projection, ["pkg/a.py"]))
+    rows = mi.candidates(projection, ["pkg/a.py"])
+    for row in rows:
+        row["origin"] = "LOCAL_STRUCTURAL"
+    payload = mi.jev_payload("fix thing", projection, ["pkg/a.py"], rows)
     encoded = json.dumps(payload, sort_keys=True)
     assert payload["model"] == "jev-latest"
     assert "baseline_score" not in encoded
     assert "raw source" not in encoded
-    assert set(payload["questions"]) == {mi._question_id(row["path"]) for row in mi.candidates(projection, ["pkg/a.py"])}
-    assert all(question["candidate_path"] in question["instructions"] for question in payload["questions"].values())
+    assert set(payload["questions"]) == {f"candidate_{index:02d}" for index in range(len(rows))}
+    assert all(row["path"] in payload["questions"][f"candidate_{index:02d}"]["instructions"] for index, row in enumerate(rows))
 
 
 def test_git_discovery_includes_staged_unstaged_untracked_but_not_ignored(tmp_path):
@@ -104,10 +107,12 @@ def test_run_offline_is_deterministic_and_never_calls_jev(tmp_path, monkeypatch,
 def test_live_uses_one_request_and_sorts_semantics(tmp_path, monkeypatch, capsys):
     root, out = tmp_path / "repo", tmp_path / "repo" / "graphify-out"
     out.mkdir(parents=True); (out / "graph.json").write_text(json.dumps(_graph()))
+    for path in ("pkg/a.py", "pkg/b.py", "pkg/c.py", "tests/test_a.py"):
+        target = root / path; target.parent.mkdir(exist_ok=True); target.write_text("fixture\n")
     calls = []
     def fake(payload, _key):
         calls.append(payload)
-        answers = {key: {"type": "noul", "noul": .5 if value["candidate_path"] == "pkg/b.py" else .9} for key, value in payload["questions"].items()}
+        answers = {key: {"type": "noul", "noul": .5 if "`pkg/b.py`" in value["instructions"] else .9} for key, value in payload["questions"].items()}
         return {"model": "jev-test", "usage": {"input_tokens": 1}, "answers": answers}
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     monkeypatch.setattr(mi, "call_typesafe", fake)

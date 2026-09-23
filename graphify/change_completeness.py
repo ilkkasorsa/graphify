@@ -102,7 +102,17 @@ def _human(plan: dict[str, Any], top: int) -> str:
             lines += ["  changed:"] + [f"  - {path}" for path in item["changed_files"]]
         shown = item["verify_candidates"][:top]
         if shown:
-            lines += ["  verify:"] + [f"  - {path} [{candidates[path]['provenance'] or 'STRUCTURAL_CANDIDATE'}, {'semantic rank ' + str(candidates[path]['semantic_rank']) if plan['live'] else 'structural rank ' + str(candidates[path]['structural_rank'])}]" for path in shown]
+            lines.append("  verify:")
+            for path in shown:
+                candidate = candidates[path]
+                rank = ("semantic rank " + str(candidate["semantic_rank"]) if plan["live"] else
+                        "structural rank " + str(candidate["structural_rank"]))
+                evidence = f"{candidate['provenance'] or 'STRUCTURAL_CANDIDATE'}, {rank}"
+                if plan["live"]:
+                    evidence += f", origin {candidate['origin']}"
+                    if "matched_task_tokens" in candidate:
+                        evidence += f", concept tokens {', '.join(candidate['matched_task_tokens'])}"
+                lines.append(f"  - {path} [{evidence}]")
         lines.append("")
     lines += [f"Overall: {plan['status']}", "", "Semantic reranking was not run." if not plan.get("live") else "Jev-ranked candidates are source-verification hypotheses.", "This is a verification plan, not proof that the change is complete."]
     return "\n".join(lines)
