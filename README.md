@@ -85,8 +85,11 @@ production thresholds.
 `graphify missing-impact --task "..."` finds a bounded set of additional
 source files worth verifying after an implementation. It derives changed files
 from staged, unstaged, and untracked non-ignored Git files, or accepts repeated
-`--changed` paths. Offline mode produces deterministic structural candidates;
-`--live` makes one explicit TypeSafe Jev request to rerank those candidates.
+`--changed` paths. Offline mode produces deterministic structural candidates.
+`--live` expands the candidate pool using deterministic graph metadata, then
+makes one explicit TypeSafe Jev request to rank it. The final verification list
+contains at most 12 files. This feature sends graph evidence, never raw source
+text, in the Jev request.
 
 Jev output is always `JEV_INFERRED`: a hypothesis, not a required change or
 source-verified fact. This is distinct from `graphify affected`, which performs

@@ -18,6 +18,10 @@ def _write(tmp_path, links=None):
     root = tmp_path / "repo"
     (root / "graphify-out").mkdir(parents=True)
     (root / "graphify-out" / "graph.json").write_text(json.dumps(_graph(links)))
+    for node in _graph(links)["nodes"]:
+        target = root / node["source_file"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("fixture\n")
     return root
 
 

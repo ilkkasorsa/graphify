@@ -9,16 +9,21 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any
 
 from graphify.jev_shadow import JevShadowError, _nodes_edges, call_typesafe
+from graphify.serve import _QUERY_STOPWORDS, _search_tokens
 
 CANDIDATE_BUDGET = 12
+LIVE_CHANNEL_BUDGET = 20
 SCHEMA_VERSION = 1
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 class MissingImpactError(ValueError):
@@ -166,17 +171,105 @@ def candidates(projection: dict[str, Any], seeds: list[str], budget: int = CANDI
     return ordered
 
 
+def _concept_tokens(value: Any) -> set[str]:
+    """Use the token and stopword rules from the qualified anchor experiment."""
+    return {token for token in _search_tokens(_CAMEL.sub(" ", str(value)))
+            if len(token) >= 3 and token not in _QUERY_STOPWORDS}
+
+
+def concept_anchors(graph: dict[str, Any], objective: str, changed: set[str]) -> list[dict[str, Any]]:
+    """Rank graph-metadata concept anchors without reading repository files."""
+    docs: dict[str, dict[str, list[tuple[int, str, str]]]] = defaultdict(lambda: defaultdict(list))
+    for node in graph["nodes"]:
+        path = _path(node.get("source_file", ""))
+        if not path:
+            continue
+        for field, value in (("label", node.get("label", "")),
+                             ("kind", node.get("type", node.get("kind", ""))), ("path", path)):
+            strength = 3 if field == "label" else 2
+            for token in _concept_tokens(value):
+                docs[path][token].append((strength, field, str(value)))
+    df = Counter(token for doc in docs.values() for token in doc)
+    n = len(docs)
+    task = sorted(token for token in _concept_tokens(objective) if df[token] <= .25 * n)
+    rows = []
+    for path, doc in docs.items():
+        if path in changed:
+            continue
+        hits = {}
+        for token in task:
+            exact = doc.get(token)
+            if exact:
+                strength, field, label = sorted(exact, key=lambda item: (-item[0], item[1], item[2]))[0]
+            else:
+                similar = [(1, field, label) for doc_token, evidence in doc.items()
+                           if token in doc_token for _, field, label in evidence]
+                if not similar:
+                    continue
+                strength, field, label = sorted(similar, key=lambda item: (item[1], item[2]))[0]
+            hits[token] = {"strength": strength, "field": field, "label": label, "df": df[token]}
+        if hits:
+            score = sum(hit["strength"] * (math.log((n + 1) / (hit["df"] + 1)) + 1)
+                        for hit in hits.values())
+            rows.append({"path": path, "anchor_score": score,
+                         "matched_task_tokens": sorted(hits),
+                         "matched_graph_labels": sorted({hit["label"] for hit in hits.values()})})
+    rows.sort(key=lambda row: (-row["anchor_score"], row["path"]))
+    return rows[:LIVE_CHANNEL_BUDGET]
+
+
+def live_candidates(graph: dict[str, Any], projection: dict[str, Any], objective: str,
+                    represented: list[str], changed: list[str], root: Path) -> list[dict[str, Any]]:
+    """Stable structural-then-anchor union qualified by the frozen experiment."""
+    structural = candidates(projection, represented, LIVE_CHANNEL_BUDGET)
+    anchors = concept_anchors(graph, objective, set(changed))
+    by_structural = {row["path"]: row for row in structural}
+    by_anchor = {row["path"]: row for row in anchors}
+    metadata = {row["path"]: row for row in projection["files"]}
+    paths = list(dict.fromkeys([row["path"] for row in structural] + [row["path"] for row in anchors]))
+    rows = []
+    for path in paths:
+        if path in changed or not (root / path).is_file():
+            continue
+        structural_row, anchor_row = by_structural.get(path), by_anchor.get(path)
+        row = dict(metadata[path])
+        row["origin"] = ("MULTI_CHANNEL" if structural_row and anchor_row else
+                         "LOCAL_STRUCTURAL" if structural_row else "CONCEPT_ANCHOR")
+        if structural_row:
+            row.update({key: structural_row[key] for key in
+                        ("structural_rank", "distance", "relations_to_seed", "relation_count",
+                         "community_overlap", "parent_relation")})
+        if anchor_row:
+            row.update({key: anchor_row[key] for key in
+                        ("matched_task_tokens", "matched_graph_labels")})
+        rows.append(row)
+    return rows
+
+
 def _question_id(path: str) -> str:
     return "file_relevant:" + hashlib.sha256(path.encode()).hexdigest()[:16]
 
 
 def jev_payload(objective: str, projection: dict[str, Any], seeds: list[str], rows: list[dict[str, Any]]) -> dict[str, Any]:
-    files = {row["path"]: row for row in projection["files"]}
-    keep = ("path", "basename", "parent", "node_count", "communities", "community_count", "test_like")
-    seed_metadata = [{key: files[path][key] for key in keep} for path in seeds]
-    candidate_metadata = [{key: row[key] for key in keep + ("distance", "relations_to_seed", "relation_count", "community_overlap", "parent_relation")} for row in rows]
-    questions = {_question_id(row["path"]): {"type": "noul", "candidate_path": row["path"], "instructions": f"Given this task and the files already being changed, is candidate file `{row['path']}` materially relevant enough that it should be source-verified for possible implementation, consumer, test, configuration, contract, or documentation impact? Judge only this candidate."} for row in rows}
-    return {"model": "jev-latest", "state": {"objective": objective, "seed_files": seed_metadata, "candidates": candidate_metadata}, "questions": questions}
+    keep = ("path", "basename", "parent", "node_count", "communities", "test_like")
+    candidate_metadata = []
+    for row in rows:
+        item = {key: row[key] for key in keep}
+        item["origin"] = {"LOCAL_STRUCTURAL": "local_structural", "CONCEPT_ANCHOR": "concept_anchor",
+                          "MULTI_CHANNEL": "both"}[row["origin"]]
+        if "distance" in row:
+            item["local_structural_evidence"] = {key: row[key] for key in
+                ("distance", "relations_to_seed", "relation_count", "community_overlap", "parent_relation")}
+        if "matched_task_tokens" in row:
+            item["concept_evidence"] = {key: row[key] for key in
+                ("matched_task_tokens", "matched_graph_labels")}
+        candidate_metadata.append(item)
+    questions = {}
+    for index, row in enumerate(rows):
+        questions[f"candidate_{index:02d}"] = {"type": "noul", "instructions":
+            f"Given `task`, `changed_seed_files`, and this candidate's graph evidence in `candidates[{index}]`, is candidate file `{row['path']}` materially relevant enough that it should be source-verified for possible implementation, consumer, test, configuration, contract, migration/schema, or documentation impact? Judge this candidate only."}
+    return {"model": "jev-latest", "state": {"task": objective, "changed_seed_files": seeds,
+            "candidates": candidate_metadata}, "questions": questions}
 
 
 def build_result(*, objective: str, root: Path, graph_path: Path, graph_fingerprint: str, projection: dict[str, Any], changed: list[str], represented: list[str], unrepresented: list[str], deleted: list[str], rows: list[dict[str, Any]], live: bool) -> dict[str, Any]:
@@ -184,8 +277,17 @@ def build_result(*, objective: str, root: Path, graph_path: Path, graph_fingerpr
               "projection_fingerprint": projection["fingerprint"], "candidate_budget": CANDIDATE_BUDGET, "live": live, "returned_model": None, "usage": None,
               "changed_files": changed, "represented_seeds": represented, "unrepresented_seeds": unrepresented, "deleted_or_unavailable_seeds": deleted, "candidates": []}
     for row in rows:
-        result["candidates"].append({key: row[key] for key in ("path", "structural_rank", "distance", "relations_to_seed", "relation_count", "community_overlap", "test_like", "parent_relation", "node_count")}
-                                    | {"provenance": "JEV_INFERRED" if live else None, "semantic_rank": None, "jev_noul": None})
+        keep = ("path", "structural_rank", "distance", "relations_to_seed", "relation_count",
+                "community_overlap", "test_like", "parent_relation", "node_count")
+        item = {key: row[key] for key in keep if key in row}
+        if live:
+            item["origin"] = row["origin"]
+            if "matched_task_tokens" in row:
+                item["matched_task_tokens"] = row["matched_task_tokens"]
+                item["matched_graph_labels"] = row["matched_graph_labels"]
+        item.update({"provenance": "JEV_INFERRED" if live else None,
+                     "semantic_rank": None, "jev_noul": None})
+        result["candidates"].append(item)
     return result
 
 
@@ -205,7 +307,8 @@ def prepare_analysis(*, objective: str, repo: str | Path = ".", graph: str | Non
         return {"status": "NO_CHANGED_FILES", "result": {"schema_version": SCHEMA_VERSION, "status": "NO_CHANGED_FILES", "objective": objective, "changed_files": []}}
     if not represented:
         return {"status": "NO_GRAPH_REPRESENTED_SEEDS", "result": {"schema_version": SCHEMA_VERSION, "status": "NO_GRAPH_REPRESENTED_SEEDS", "objective": objective, "changed_files": changed, "unrepresented_seeds": unrepresented, "deleted_or_unavailable_seeds": deleted}}
-    rows = candidates(projection, represented)
+    rows = (live_candidates(graph_value, projection, objective, represented, changed, root)
+            if live else candidates(projection, represented))
     result = build_result(objective=objective, root=root, graph_path=graph_path, graph_fingerprint=graph_fingerprint, projection=projection, changed=changed, represented=represented, unrepresented=unrepresented, deleted=deleted, rows=rows, live=live)
     status = "NO_MISSING_IMPACT_CANDIDATES" if not rows else None
     if status:
@@ -222,12 +325,13 @@ def rerank_live(analysis: dict[str, Any]) -> None:
     if not key:
         raise MissingImpactError("TYPESAFE_API_KEY is required for --live")
     response = call_typesafe(jev_payload(result["objective"], analysis["projection"], analysis["represented"], rows), key)
-    scores = {row["path"]: response["answers"][_question_id(row["path"])]["noul"] for row in rows}
+    scores = {row["path"]: response["answers"][f"candidate_{index:02d}"]["noul"]
+              for index, row in enumerate(rows)}
     result["returned_model"], result["usage"] = response["model"], response["usage"]
     ranked = sorted(result["candidates"], key=lambda row: (-scores[row["path"]], row["path"]))
     for rank, row in enumerate(ranked, 1):
         row["semantic_rank"], row["jev_noul"], row["provenance"] = rank, scores[row["path"]], "JEV_INFERRED"
-    result["candidates"] = ranked
+    result["candidates"] = ranked[:CANDIDATE_BUDGET]
 
 
 def _human(result: dict[str, Any], status: str | None = None) -> str:
@@ -238,7 +342,15 @@ def _human(result: dict[str, Any], status: str | None = None) -> str:
     if result["deleted_or_unavailable_seeds"]: lines += ["", "Deleted or unavailable changed files:"] + [f"- {path}" for path in result["deleted_or_unavailable_seeds"]]
     lines += ["", "JEV_INFERRED — source verification required" if result["live"] else "Semantic reranking not run; use --live to request Jev judgments."]
     for index, row in enumerate(result["candidates"], 1):
-        lines += ["", f"{index}. {row['path']}", f"   semantic relevance: {row['jev_noul'] if row['jev_noul'] is not None else '-'}", f"   structural rank: {row['structural_rank']}", f"   evidence: {', '.join(row['relations_to_seed']) or 'structural context'}; distance {row['distance']}"]
+        lines += ["", f"{index}. {row['path']}", f"   semantic relevance: {row['jev_noul'] if row['jev_noul'] is not None else '-'}"]
+        if "structural_rank" in row:
+            lines += [f"   structural rank: {row['structural_rank']}",
+                      f"   evidence: {', '.join(row['relations_to_seed']) or 'structural context'}; distance {row['distance']}"]
+        if "origin" in row:
+            lines.append(f"   origin: {row['origin']}")
+            if "matched_task_tokens" in row:
+                lines.append(f"   concept tokens: {', '.join(row['matched_task_tokens'])}")
+                lines.append(f"   graph labels: {', '.join(row['matched_graph_labels'])}")
     lines += ["", "These are hypotheses, not confirmed missing changes."]
     return "\n".join(lines)
 
